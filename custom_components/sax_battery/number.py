@@ -56,22 +56,32 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class SAXBatteryMaxChargeNumber(NumberEntity):
-    """SAX Battery Maximum Charge Power number."""
+class SAXBatteryLimitNumber(NumberEntity):
+    """Base class for SAX Battery limit number entities."""
 
-    def __init__(self, coordinator: SAXBatteryCoordinator) -> None:
-        """Initialize the SAX Battery Maximum Charge Power number."""
+    def __init__(
+        self,
+        coordinator: SAXBatteryCoordinator,
+        unique_id: str,
+        name: str,
+        max_per_battery: int,
+        register: int,
+        write_action: str,
+    ) -> None:
+        """Initialize the SAX Battery limit number entity."""
         self._coordinator = coordinator
-        self._attr_unique_id = f"{DOMAIN}_max_charge_power"
-        self._attr_name = "Maximum Charge Power"
+        self._register = register
+        self._write_action = write_action
+        self._attr_unique_id = unique_id
+        self._attr_name = name
         self._attr_native_min_value = 0
 
         # Calculate dynamic max value based on battery count
         battery_count = len(coordinator.batteries)
-        self._attr_native_max_value = battery_count * 3500  # 3.5kW per battery
+        self._attr_native_max_value = battery_count * max_per_battery
         self._attr_native_step = 100
         self._attr_native_unit_of_measurement = UnitOfPower.WATT
-        self._attr_native_value = self._attr_native_max_value  # Start at max
+        self._attr_native_value = self._attr_native_max_value
         self._attr_mode = NumberMode.SLIDER
         self._last_written_value = self._attr_native_max_value
 
@@ -115,7 +125,7 @@ class SAXBatteryMaxChargeNumber(NumberEntity):
 
     async def _write_value(self, value: float) -> None:
         """Write the value to the hardware."""
-        _LOGGER.debug("Attempting to write max charge value: %s", value)
+        _LOGGER.debug("Attempting to write %s value: %s", self._write_action, value)
 
         try:
             # Get the modbus client from the master battery's data manager
@@ -156,16 +166,17 @@ class SAXBatteryMaxChargeNumber(NumberEntity):
             slave_id = 64
 
             _LOGGER.debug(
-                "Writing charge limit: total_value=%s, per_battery=%s, int_value=%s to register 44 with device_id=%s",
+                "Writing %s limit: total_value=%s, per_battery=%s, int_value=%s to register %s with device_id=%s",
+                self._write_action,
                 value,
                 value_per_battery,
                 value_int,
+                self._register,
                 slave_id,
             )
 
-            # Write to register 44 (charge power limit)
             result = await client.write_registers(
-                44,  # Charge power limit register
+                self._register,
                 [value_int],
                 device_id=slave_id,
             )
@@ -180,148 +191,48 @@ class SAXBatteryMaxChargeNumber(NumberEntity):
                 except Exception as reconnect_err:  # noqa: BLE001
                     _LOGGER.debug("Failed to reconnect after error: %s", reconnect_err)
             else:
-                _LOGGER.debug("Successfully wrote max charge value: %s", value)
-                # Only update _last_written_value on successful write
+                _LOGGER.debug("Successfully wrote %s value: %s", self._write_action, value)
                 self._last_written_value = value
                 self._attr_native_value = value
                 self.async_write_ha_state()
 
         except Exception as err:
-            _LOGGER.error("Failed to write max charge value: %s", err, exc_info=True)  # noqa: G201
+            _LOGGER.error(
+                "Failed to write %s value: %s",
+                self._write_action,
+                err,
+                exc_info=True,
+            )  # noqa: G201
 
 
-class SAXBatteryMaxDischargeNumber(NumberEntity):
+class SAXBatteryMaxChargeNumber(SAXBatteryLimitNumber):
+    """SAX Battery Maximum Charge Power number."""
+
+    def __init__(self, coordinator: SAXBatteryCoordinator) -> None:
+        """Initialize the SAX Battery Maximum Charge Power number."""
+        super().__init__(
+            coordinator,
+            unique_id=f"{DOMAIN}_max_charge_power",
+            name="Maximum Charge Power",
+            max_per_battery=3500,
+            register=44,
+            write_action="max charge",
+        )
+
+
+class SAXBatteryMaxDischargeNumber(SAXBatteryLimitNumber):
     """SAX Battery Maximum Discharge Power number."""
 
     def __init__(self, coordinator: SAXBatteryCoordinator) -> None:
         """Initialize the SAX Battery Maximum Discharge Power number."""
-        self._coordinator = coordinator
-        self._attr_unique_id = f"{DOMAIN}_max_discharge_power"
-        self._attr_name = "Maximum Discharge Power"
-        self._attr_native_min_value = 0
-
-        # Calculate dynamic max value based on battery count
-        battery_count = len(coordinator.batteries)
-        self._attr_native_max_value = battery_count * 4600  # 4.6kW per battery
-        self._attr_native_step = 100
-        self._attr_native_unit_of_measurement = UnitOfPower.WATT
-        self._attr_native_value = self._attr_native_max_value  # Start at max
-        self._attr_mode = NumberMode.SLIDER
-        self._last_written_value = self._attr_native_max_value
-
-        # Set up periodic writes
-        self._track_time_remove: Callable[[], None] | None = None
-
-        # Add device info
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, self._coordinator.device_id)},
-            "name": "SAX Battery System",
-            "manufacturer": "SAX",
-            "model": "SAX Battery",
-            "sw_version": "1.0",
-        }
-
-    async def async_added_to_hass(self) -> None:
-        """Set up periodic writes."""
-        self._track_time_remove = async_track_time_interval(
-            self.hass, self._periodic_write, timedelta(minutes=1)
+        super().__init__(
+            coordinator,
+            unique_id=f"{DOMAIN}_max_discharge_power",
+            name="Maximum Discharge Power",
+            max_per_battery=4600,
+            register=43,
+            write_action="max discharge",
         )
-
-    async def async_will_remove_from_hass(self) -> None:
-        """Clean up when entity is removed."""
-        if self._track_time_remove:
-            self._track_time_remove()
-
-    async def async_set_native_value(self, value: float) -> None:
-        """Update the current value."""
-        await self._write_value(value)
-
-    async def _periodic_write(self, _: Any) -> None:
-        """Write the value periodically."""
-        if self._attr_native_value is not None:
-            if (
-                self._attr_native_value == self._attr_native_max_value
-                and self._last_written_value == self._attr_native_max_value
-            ):
-                # Skip periodic writes for max value only if already written
-                return
-            await self._write_value(self._attr_native_value)
-
-    async def _write_value(self, value: float) -> None:
-        """Write the value to the hardware."""
-        _LOGGER.debug("Attempting to write max discharge value: %s", value)
-
-        try:
-            # Get the modbus client from the master battery's data manager
-            master_battery = self._coordinator.master_battery
-            if not master_battery:
-                _LOGGER.error("Master battery not available")
-                return
-
-            if not hasattr(master_battery, "_data_manager"):
-                _LOGGER.error("Master battery data manager not available")
-                return
-
-            client = master_battery._data_manager.modbus_clients.get(  # noqa: SLF001
-                master_battery.battery_id
-            )
-
-            if client is None:
-                _LOGGER.error(
-                    "No Modbus client found for battery %s", master_battery.battery_id
-                )
-                return
-
-            # Check connection status
-            if not client.connected:
-                _LOGGER.error("Modbus client not connected, attempting to reconnect")
-                try:
-                    await client.connect()
-                    _LOGGER.info("Reconnected to Modbus device")
-                except Exception as connect_err:  # noqa: BLE001
-                    _LOGGER.error("Failed to reconnect: %s", connect_err)
-                    return
-
-            # Divide by number of batteries due to manufacturer bug
-            # Each battery applies the limit individually, so we send per-battery value
-            battery_count = len(self._coordinator.batteries)
-            value_per_battery = value / battery_count if battery_count > 0 else value
-            value_int = int(value_per_battery) & 0xFFFF
-            slave_id = 64
-
-            _LOGGER.debug(
-                "Writing discharge limit: total_value=%s, per_battery=%s, int_value=%s to register 43 with device_id=%s",
-                value,
-                value_per_battery,
-                value_int,
-                slave_id,
-            )
-
-            # Write to register 43 (discharge power limit)
-            result = await client.write_registers(
-                43,  # Discharge power limit register
-                [value_int],
-                device_id=slave_id,
-            )
-
-            # Check result for errors
-            if result.isError():
-                _LOGGER.error("Error writing max discharge value: %s", result)
-                # Try to reconnect for next time
-                try:
-                    await client.close()
-                    await client.connect()
-                except Exception as reconnect_err:  # noqa: BLE001
-                    _LOGGER.debug("Failed to reconnect after error: %s", reconnect_err)
-            else:
-                _LOGGER.debug("Successfully wrote max discharge value: %s", value)
-                # Only update _last_written_value on successful write
-                self._last_written_value = value
-                self._attr_native_value = value
-                self.async_write_ha_state()
-
-        except Exception as err:
-            _LOGGER.error("Failed to write max discharge value: %s", err, exc_info=True)  # noqa: G201
 
 
 class SAXBatteryPilotIntervalNumber(NumberEntity):
